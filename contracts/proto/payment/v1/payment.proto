@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package payment.v1;
+
+option go_package = "github.com/foodly/contracts/gen/go/payment/v1;paymentv1";
+
+service PaymentService {
+    rpc Charge(ChargeRequest) returns (ChargeResponse);
+    rpc Refund(RefundRequest) returns (RefundResponse);
+}
+
+message ChargeRequest {
+    string idempotency_key = 1;
+    string order_id = 2;
+    int64 amount_minor = 3;
+}
+
+message ChargeResponse {
+    string payment_id = 1;
+}
+
+message RefundRequest {
+    string idempotency_key = 1;
+    string payment_id = 2;
+}
+
+message RefundResponse {}

@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+package catalog.v1;
+
+option go_package = "github.com/foodly/contracts/gen/go/catalog/v1;catalogv1";
+
+service CatalogService {
+    rpc ListRestaurants(ListRestaurantsRequest) returns (ListRestaurantsResponse);
+    rpc GetMenu(GetMenuRequest) returns (GetMenuResponse);
+    rpc ReserveItems(ReserveItemsRequest) returns (ReserveItemsResponse);
+    rpc ReleaseItems(ReleaseItemsRequest) returns (ReleaseItemsResponse);
+}
+
+message Restaurant {
+    string id = 1;
+    string name = 2;
+}
+
+message MenuItem {
+    string id = 1;
+    string name = 2;
+    int64 price_minor = 3;
+    int32 available_qty = 4;
+}
+
+message ListRestaurantsRequest {}
+
+message ListRestaurantsResponse {
+    repeated Restaurant restaurants = 1;
+}
+
+message GetMenuRequest {
+    string restaurant_id = 1;
+}
+
+message GetMenuResponse {
+    repeated MenuItem items = 1;
+}
+
+message ReserveItem {
+    string menu_item_id = 1;
+    int32 quantity = 2;
+}
+
+message ReserveItemsRequest {
+    string idempotency_key = 1;
+    string restaurant_id = 2;
+    repeated ReserveItem items = 3;
+}
+
+message ReserveItemsResponse {
+    string reservation_id = 1;
+}
+
+message ReleaseItemsRequest {
+    string idempotency_key = 1;
+    string reservation_id = 2;
+}
+
+message ReleaseItemsResponse {}
