@@ -2,11 +2,11 @@ package user
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -57,7 +57,7 @@ func (r *Repository) FindByEmail(ctx context.Context, email string) (User, error
 		FROM users
 		WHERE LOWER(email) = LOWER($1)
 	`, email).Scan(&u.ID, &u.Email, &u.PasswordHash, &u.Name)
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, ErrNotFound
 	}
 	if err != nil {

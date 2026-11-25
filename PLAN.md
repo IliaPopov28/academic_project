@@ -6,13 +6,30 @@
 
 ## Где мы сейчас
 
-Сделано:
+**Этап 1 (identity) — закрыт.** Проверено через `grpcurl` (2026-11-25):
 
-- Контракты: `identity`, `catalog`, `order`, `payment`, `events`. `buf generate` уже проходил.
-- Миграции всех сервисов лежат в `migrations/`, в базы вручную их не накатывали. `identity` создаёт `identity_db` и накатывает свою миграцию при старте.
-- `identity`: работает только `Register` (gRPC `:50051`, пользователь `ada@example.com` уже есть).
+- Login `ada@example.com` / `secret12` → `accessToken`
+- ValidateToken этим токеном → `isValid: true`, `userId` = `4de2ce99-efe1-47d3-85a7-db7116b0f777`
+- неверный пароль → `Unauthenticated`
+- битый токен → успешный RPC, в JSON часто `{}` (поля с нулями не печатаются; это `is_valid=false`)
 
-Дальше, и только это: `Login` и `ValidateToken` в `identity`. Kafka, catalog и order не начинать, пока логин не проверен через `grpcurl`.
+Также сделано раньше:
+
+- Контракты всех сервисов + `buf generate`
+- SQL-миграции identity / catalog / order / payment / notification в файлах
+- Репозиторий на GitHub: https://github.com/IliaPopov28/academic_project (публичный). `.env` и `*.exe` в git не попадают
+- Postgres Foodly: контейнер `foodly-postgres`, порт **5433**. Перед стартом сервисов: `docker start foodly-postgres`
+
+**Дальше — только этап 2: catalog.** Не начинать order, payment, Kafka, gateway, Dockerfile/Makefile сервисов.
+
+Порядок работ по catalog (не перескакивать):
+
+1. Каркас как у identity: `go.mod`, `.env` / `.env.example`, `config`, `postgres` (EnsureDatabase + Migrate + NewPool), `migrations/fs.go`, `main` без gRPC → проверка: база `catalog_db`, сид Pizza Place / Margherita / Cola
+2. Чтение: репозиторий + сценарий + gRPC `ListRestaurants`, `GetMenu` → проверка `grpcurl`
+3. Запись: `ReserveItems` / `ReleaseItems` с идемпотентностью и транзакцией → проверка `grpcurl`
+4. Outbox-таблица уже в миграции; **publisher Kafka не писать** до этапа 5
+
+`Dockerfile` и `Makefile` у сервисов — пустые заготовки. Наполнять после этапа Kafka / когда соберём compose в `infra`.
 
 ## Зачем проект
 
@@ -199,19 +216,82 @@ Saga создания заказа, один синхронный RPC `CreateOrd
 
 Каждый этап заканчивается проверкой из таблицы. Следующий не начинать раньше.
 
-### 1. Identity
+### 1. Identity — готово
 
-Сейчас. `Register` готов.
+Что лежит в коде:
 
-Осталось: `FindByEmail`, `Login`, JWT, `ValidateToken`. Секрет только из `JWT_SECRET`, не короче 32 байт. Пустой секрет — ошибка старта, не запасное значение в коде. Неверный email и неверный пароль снаружи одинаковы (`Unauthenticated`). Если пользователя нет, всё равно выполнить сравнение bcrypt с заранее посчитанным хешем, чтобы ответ не был мгновенным. Алгоритм токена проверять: принимать только HS256.
+- `Register`, `Login`, `ValidateToken` (gRPC + сценарий + репозиторий)
+- JWT HS256, секрет из `JWT_SECRET` (≥ 32 байт), срок 24 часа, claims: `sub` / `iat` / `exp`
+- `dummyHash` считается при старте из `crypto/rand` (не строка из интернета)
+- конфиг только из `.env` через `godotenv`, без дефолтов в Go
+- миграции через `embed` + `iofs`
 
-Проверка: `grpcurl` Login для `ada@example.com` / `secret12` возвращает токен; ValidateToken даёт `isValid: true` и тот же user id; чужой пароль — `Unauthenticated`; порванный токен — успех RPC и `isValid: false`.
+Замечания на ревью (не блокируют этап, поправить при случае):
 
-### 2. Catalog
+- при неизвестном email в `Login` желательно всё же вызывать `bcrypt.CompareHashAndPassword(s.dummyHash, ...)` до `ErrUnauthenticated`
+- в `FindByEmail` сравнивать с `pgx.ErrNoRows`, не `sql.ErrNoRows`
 
-Чтение меню и резерв. Без Kafka: outbox-таблица есть, publisher не писать.
+Проверка пройдена (см. «Где мы сейчас»).
 
-Сценарии: список ресторанов и меню отдают сид; `ReserveItems` уменьшает `available_qty` и возвращает `reservation_id`; повтор с тем же ключом не уменьшает остаток второй раз; нехватка — `FailedPrecondition` или `ResourceExhausted`; `ReleaseItems` возвращает количество и ставит `released_at`.
+### 2. Catalog — текущий этап
+
+Без Kafka: outbox-таблица есть, publisher не писать. CRUD ресторанов не делать — только сид.
+
+**Сид (фиксированные UUID из миграции `000002_seed`):**
+
+| Что | UUID | Прочее |
+|---|---|---|
+| Pizza Place | `a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11` | |
+| Margherita | `b0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11` | `price_minor=45000`, qty 20 |
+| Cola | `c0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11` | `price_minor=15000`, qty 50 |
+
+**Структура пакетов (как identity):**
+
+```
+catalog/
+  go.mod
+  .env.example          # DATABASE_URL, GRPC_ADDR=:50052
+  cmd/catalog/main.go
+  internal/config
+  internal/postgres     # копия паттерна identity, импорт catalog/migrations
+  internal/catalog      # или internal/menu — сценарий + репозиторий
+  internal/grpc         # package grpcsrv
+  migrations/           # 000001_init + 000002_seed уже есть
+```
+
+**Зависимости в go.mod:** `pgx/v5`, `golang-migrate`, `godotenv`, `google.golang.org/grpc`, `github.com/foodly/contracts` + `replace => ../contracts`, `google/uuid`.
+
+**Поведение RPC:**
+
+| RPC | Успех | Ошибки |
+|---|---|---|
+| `ListRestaurants` | список из сида | — |
+| `GetMenu` | позиции ресторана | неизвестный ресторан → `NotFound` |
+| `ReserveItems` | `reservation_id`, `available_qty` уменьшен | пустой ключ/позиции → `InvalidArgument`; нехватка → `FailedPrecondition` или `ResourceExhausted`; повтор того же `idempotency_key` → тот же `reservation_id`, остаток не трогать |
+| `ReleaseItems` | пустой ответ, qty возвращён, `released_at` | нет резерва → `NotFound`; уже отпущен → идемпотентный успех по `release_idempotency_key` или повтор без двойного возврата |
+
+`Reserve` и `Release` — в одной транзакции: строки меню с блокировкой (`FOR UPDATE`), запись `reservations` / `reservation_items`, изменение qty. События в outbox на этом этапе можно не писать (таблица пустая), пока не дойдём до Kafka.
+
+**Проверка каркаса:**
+
+```powershell
+docker start foodly-postgres
+cd catalog
+Copy-Item .env.example .env   # если ещё нет
+go run ./cmd/catalog
+```
+
+В pgAdmin на `5433`: база `catalog_db`, две строки в `menu_items`.
+
+**Проверка чтения (после gRPC):**
+
+```powershell
+grpcurl -plaintext -import-path .\contracts\proto -proto catalog/v1/catalog.proto -d '{}' localhost:50052 catalog.v1.CatalogService/ListRestaurants
+
+grpcurl -plaintext -import-path .\contracts\proto -proto catalog/v1/catalog.proto -d '{"restaurant_id":"a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"}' localhost:50052 catalog.v1.CatalogService/GetMenu
+```
+
+**Проверка резерва (после Reserve/Release):** один `Reserve` уменьшает qty; повтор с тем же `idempotency_key` — тот же `reservation_id`, qty не меняется; `Release` возвращает qty; повторный `Release` не накручивает остаток.
 
 ### 3. Order без оплаты и без Kafka
 
@@ -245,15 +325,30 @@ Saga создания заказа, один синхронный RPC `CreateOrd
 
 Нет переменной — процесс завершается с текстом, какой переменной не хватает.
 
-Первый набор у identity:
+Переменные по сервисам (имена не выдумывать заново):
 
-| Переменная | Смысл |
+| Сервис | Переменные |
 |---|---|
-| `DATABASE_URL` | Postgres, включая имя базы `identity_db` |
-| `GRPC_ADDR` | адрес прослушивания, например `:50051` |
-| `JWT_SECRET` | секрет HS256, не короче 32 байт |
+| identity | `DATABASE_URL` → `identity_db`, `GRPC_ADDR=:50051`, `JWT_SECRET` (≥ 32 байт) |
+| catalog | `DATABASE_URL` → `catalog_db`, `GRPC_ADDR=:50052` (JWT нет) |
+| order | позже: `DATABASE_URL` → `order_db`, `GRPC_ADDR=:50053`, адреса catalog/payment |
+| payment | позже: `DATABASE_URL` → `payment_db`, `GRPC_ADDR=:50054` |
+| notification | позже: `DATABASE_URL` → `notification_db`, брокеры Kafka |
+| gateway | позже: `HTTP_ADDR=:8080`, адреса identity/catalog/order |
 
-Следующие сервисы заводят свой `.env` с теми же именами и своим портом и базой. Имена не выдумывать заново.
+Локальный учебный DSN (только в `.env` / `.env.example`, не в Go):
+
+`postgres://postgres:postgres@localhost:5433/<имя_базы>?sslmode=disable`
+
+## Документация и права агента на `.md`
+
+Пользователь разрешил править в этом проекте markdown без отдельной просьбы каждый раз:
+
+- `PLAN.md` — после подтверждённой проверки этапа обновлять «Где мы сейчас»; детали этапа расписывать заранее, чтобы не забывать
+- `README.md` — краткая навигация, без дублирования всего плана
+- `.cursor/rules/*.mdc` — правила обучения и следования плану
+
+Код Go / SQL / proto по-прежнему пишет пользователь из фрагментов в чате, пока не попросит правку конкретного файла.
 
 ## Чего агент не делает по своей инициативе
 
@@ -265,4 +360,5 @@ Saga создания заказа, один синхронный RPC `CreateOrd
 - Не добавляет CRUD ресторана: меню для учёбы берётся из сида.
 - Не логирует пароль, токен и полный DSN.
 - Не считает молчание пользователя согласием на новый этап.
+- Не наполняет `Dockerfile` / `Makefile` сервисов до этапа infra / контейнеризации.
 - В PowerShell не экранирует кавычки обратным слэшем.

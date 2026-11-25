@@ -74,6 +74,7 @@ func (s *Service) Register(ctx context.Context, email, password, name string) (u
 func (s *Service) Login(ctx context.Context, email, password string) (string, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if email == "" || password == "" {
+		_ = bcrypt.CompareHashAndPassword(s.dummyHash, []byte(password)) // dummy hash is used to avoid timing attacks
 		return "", ErrInvalidInput
 	}
 
